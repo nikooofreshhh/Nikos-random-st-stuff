@@ -1,0 +1,151 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>touchmap</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #111; color: #ddd; font: 14px system-ui, sans-serif; overflow: hidden; overscroll-behavior: none; }
+  #bar { position: fixed; top: 0; left: 0; right: 0; height: 44px; display: flex; gap: 8px; align-items: center; padding: 0 8px; background: #222; z-index: 2; box-sizing: border-box; }
+  button { font: 14px system-ui, sans-serif; padding: 8px 12px; border: 0; border-radius: 6px; background: #444; color: #fff; }
+  button:active { background: #666; }
+  #status { flex: 1; font-size: 12px; color: #aaa; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  #c { position: fixed; top: 44px; left: 0; touch-action: none; background: #000; }
+  #links { position: fixed; bottom: 8px; left: 8px; right: 8px; font-size: 13px; z-index: 2; pointer-events: none; }
+  #links a, #links span { pointer-events: auto; background: rgba(0,0,0,.7); padding: 4px 8px; border-radius: 4px; margin-right: 6px; }
+  a { color: #8cf; }
+</style>
+</head>
+<body>
+<div id="bar">
+  <button id="save">Save</button>
+  <button id="clear">Clear</button>
+  <span id="status">touch the black area; Save when done</span>
+</div>
+<canvas id="c"></canvas>
+<div id="links"></div>
+<script>
+(() => {
+  const c = document.getElementById('c');
+  const ctx = c.getContext('2d');
+  const status = document.getElementById('status');
+  const links = document.getElementById('links');
+  const BAR = 44;
+
+  let events = [];
+  let t0 = null, started = null;
+  let wMin = Infinity, wMax = -Infinity;
+  const live = {};  // pointerId -> last [x, y]
+
+  function fit() {
+    const dpr = window.devicePixelRatio || 1;
+    const w = window.innerWidth, h = window.innerHeight - BAR;
+    c.style.width = w + 'px'; c.style.height = h + 'px';
+    c.width = Math.round(w * dpr); c.height = Math.round(h * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  window.addEventListener('resize', fit);
+  fit();
+
+  function rec(kind, e) {
+    if (t0 === null) { t0 = e.timeStamp; started = new Date().toISOString(); }
+    const r = c.getBoundingClientRect();
+    const w = e.width || 0, h = e.height || 0;
+    if (kind !== 'u' && kind !== 'c') { wMin = Math.min(wMin, w); wMax = Math.max(wMax, w); }
+    events.push({
+      id: e.pointerId, k: kind,
+      t: +(e.timeStamp - t0).toFixed(2),
+      x: +(e.clientX - r.left).toFixed(1),
+      y: +(e.clientY - r.top).toFixed(1),
+      w: +w.toFixed(1), h: +h.toFixed(1),
+      p: +(e.pressure || 0).toFixed(3),
+    });
+  }
+
+  function updateStatus() {
+    const area = (wMax > 0 && (wMax - wMin) / wMax > 0.15) ? 'contact size varies (good)' : 'contact size constant';
+    status.textContent = `${events.length} samples · ${area} · ${(wMin === Infinity ? '-' : wMin)}–${(wMax === -Infinity ? '-' : wMax)}px`;
+  }
+
+  function dot(e, color) {
+    const r = c.getBoundingClientRect();
+    const x = e.clientX - r.left, y = e.clientY - r.top;
+    const rad = Math.max(3, (e.width || 6) / 2);
+    ctx.fillStyle = color;
+    ctx.beginPath(); ctx.arc(x, y, rad, 0, Math.PI * 2); ctx.fill();
+    return [x, y];
+  }
+
+  function trail(id, x, y) {
+    const p = live[id];
+    if (p) {
+      ctx.strokeStyle = 'rgba(255,255,255,0.35)'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(p[0], p[1]); ctx.lineTo(x, y); ctx.stroke();
+    }
+    live[id] = [x, y];
+  }
+
+  c.addEventListener('pointerdown', e => {
+    e.preventDefault();
+    try { c.setPointerCapture(e.pointerId); } catch (_) {}
+    rec('d', e);
+    const [x, y] = dot(e, 'rgba(120,200,255,0.9)');
+    live[e.pointerId] = [x, y];
+    updateStatus();
+  });
+
+  c.addEventListener('pointermove', e => {
+    if (!(e.pointerId in live)) return;
+    e.preventDefault();
+    const list = (e.getCoalescedEvents && e.getCoalescedEvents().length) ? e.getCoalescedEvents() : [e];
+    for (const ce of list) rec('m', ce);
+    const r = c.getBoundingClientRect();
+    trail(e.pointerId, e.clientX - r.left, e.clientY - r.top);
+    if (events.length % 10 === 0) updateStatus();
+  });
+
+  function end(kind) {
+    return e => {
+      if (!(e.pointerId in live)) return;
+      e.preventDefault();
+      rec(kind, e);
+      dot(e, 'rgba(255,160,80,0.9)');
+      delete live[e.pointerId];
+      updateStatus();
+    };
+  }
+  c.addEventListener('pointerup', end('u'));
+  c.addEventListener('pointercancel', end('c'));
+  c.addEventListener('contextmenu', e => e.preventDefault());
+
+  document.getElementById('clear').addEventListener('click', () => {
+    events = []; t0 = null; started = null; wMin = Infinity; wMax = -Infinity;
+    for (const k in live) delete live[k];
+    ctx.clearRect(0, 0, c.width, c.height);
+    links.innerHTML = '';
+    status.textContent = 'cleared; touch the black area';
+  });
+
+  document.getElementById('save').addEventListener('click', async () => {
+    if (!events.length) { status.textContent = 'nothing recorded yet'; return; }
+    status.textContent = 'saving…';
+    const r = c.getBoundingClientRect();
+    const payload = {
+      started, userAgent: navigator.userAgent,
+      canvas: { w: Math.round(r.width), h: Math.round(r.height), dpr: window.devicePixelRatio || 1 },
+      events,
+    };
+    try {
+      const res = await fetch('/save', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+      const j = await res.json();
+      if (!res.ok) throw new Error(j.error || res.statusText);
+      status.textContent = 'saved ' + j.name;
+      links.innerHTML = `<a href="${j.png}" target="_blank">image</a><a href="${j.txt}" target="_blank">summary</a><a href="${j.json}" target="_blank">raw</a>`;
+    } catch (err) {
+      status.textContent = 'save failed: ' + err.message;
+    }
+  });
+})();
+</script>
+</body>
+</html>
